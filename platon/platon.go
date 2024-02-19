@@ -85,8 +85,19 @@ func NewEntry(time int64) *Entry {
 	}
 }
 
-func MetricsToTable(queryResults []model.Value, tableName string, database *frostdb.DB) error {
-	labelNames, metricNames := FillColumnHeads(queryResults)
+type Cube struct {
+	Name        string
+	Description string
+	LastRefresh string
+	Labels      []string
+	Metrics     []string
+}
+
+func MetricsToTable(queryResults []model.Value, tableName string, database *frostdb.DB) (Cube, error) {
+	cube := Cube{
+		Name: tableName,
+	}
+	cube.Labels, cube.Metrics = FillColumnHeads(queryResults)
 
 	timeData := []int64{}
 	entries := []Entry{}
@@ -103,13 +114,13 @@ func MetricsToTable(queryResults []model.Value, tableName string, database *fros
 					timeData = append(timeData, time)
 					entries = append(entries, *entry)
 				}
-				for dimension := range metricNames {
+				for _, dimension := range cube.Metrics {
 					if dimension == string(sampleStream.Metric["__name__"]) {
 						entry.Metrics[dimension] = float64(value.Value)
 						break
 					}
 				}
-				for dimension := range labelNames {
+				for _, dimension := range cube.Labels {
 					for label, value := range sampleStream.Metric {
 						if dimension == string(label) {
 							entry.Labels[dimension] = string(value)
@@ -121,23 +132,23 @@ func MetricsToTable(queryResults []model.Value, tableName string, database *fros
 		}
 	}
 	if len(entries) != len(timeData) {
-		return fmt.Errorf("data load error: Inconsistent cube data")
+		return cube, fmt.Errorf("data load error: Inconsistent cube data")
 	}
 
 	dbtable, err := frostdb.NewGenericTable[Entry](
 		database, tableName, memory.DefaultAllocator,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to create db table: %v", err)
+		return cube, fmt.Errorf("failed to create db table: %v", err)
 	}
 	dbtable.Write(context.Background(), entries...)
-	return nil
+	return cube, nil
 }
 
-func FillColumnHeads(queryResults []model.Value) (labelNames, metricNames map[string]bool) {
+func FillColumnHeads(queryResults []model.Value) (labelNames, metricNames []string) {
 
-	metricNames = map[string]bool{}
-	labelNames = map[string]bool{}
+	metricNames = []string{}
+	labelNames = []string{}
 	for _, metrics := range queryResults {
 		// map results into matrix
 		matrix := metrics.(model.Matrix)
@@ -146,11 +157,15 @@ func FillColumnHeads(queryResults []model.Value) (labelNames, metricNames map[st
 			for label, value := range sampleStream.Metric {
 				// We want to make the name a column
 				if string(label) != "__name__" {
-					labelNames[string(label)] = true
+					if !slices.Contains(labelNames, string(label)) {
+						labelNames = append(labelNames, string(label))
+					}
 				}
 				// Add metric name as column
 				if string(label) == "__name__" {
-					metricNames[string(value)] = true
+					if !slices.Contains(metricNames, string(value)) {
+						metricNames = append(metricNames, string(value))
+					}
 				}
 			}
 		}

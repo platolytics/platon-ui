@@ -1,11 +1,18 @@
 package home
 
+import(
+	"github.com/platolytics/platon-ui/platon"
+    "strings"
+)
+
 templ nav() {
     <nav class="col-md-3 col-xl-2 nav flex-column sidebar">
     <a class="nav-link" href="/bar">Bar Chart</a>
     <a class="nav-link" href="/line">Line Chart</a>
     <a class="nav-link" href="/weather">Weather data</a>
     <a class="nav-link" href="/prometheus">Prometheus data</a>
+    <a class="nav-link" href="/cubes">Data Cubes</a>
+    <a class="nav-link" href="/metrics">Available Metrics</a>
     </nav>
 }
 
@@ -50,9 +57,39 @@ templ screen(container templ.Component) {
 
         <script src="https://cdn.jsdelivr.net/npm/jquery@3.5.1/dist/jquery.slim.min.js" integrity="sha384-DfXdz2htPH0lsSSs5nCTpuj/zy4C+OGpamoFVy38MVBnE+IbbVYUew+OrCXaRkfj" crossorigin="anonymous"></script>
         <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js" integrity="sha384-Fy6S3B9q64WdZWQUiU+q4/2Lc9npb8tCaSX9FK7E8HnRr0Jz8D6OP9dO5Vg3Q9ct" crossorigin="anonymous"></script>
+<script type="text/javascript">
+$(function() {                       
+  $(".metric-list").click(function() { 
+    $(this).toggleClass("active");      
+  });
+});
+</script>
 
     </body>
     </html>
+}
+
+templ renderCubes(cubes []platon.Cube) {
+    <div class="list-group">
+    for _, cube := range cubes {
+        <a href={ templ.SafeURL("/prometheus?cube="+cube.Name) } class="list-group-item list-group-item-action active">
+            <div class="d-flex w-100 justify-content-between">
+            <h5 class="mb-1">{ cube.Name }</h5>
+            <p class="mb-1">Labels: { strings.Join(cube.Labels, ", ") }</p>
+            <p class="mb-1">Metrics: { strings.Join(cube.Metrics, ", ") }</p>
+            </div>
+            <small>{ cube.Description }</small>
+        </a>
+    }
+    </div>
+
+}
+templ renderMetrics(metrics []string) {
+    <div class="list-group">
+    for _, metric := range metrics {
+        <a href="#" class="list-group-item list-group-item-action metric-list">{ metric }</a>
+    }
+</div>
 }
 
 templ barChart(chartContent string) {
@@ -63,4 +100,15 @@ templ barChart(chartContent string) {
 
 templ Page(chartContent string) {
     @screen(barChart(chartContent))
+}
+
+templ Cubes(cubes []platon.Cube) {
+    @screen(renderCubes(cubes))
+
+}
+
+
+templ Metrics(metrics []string) {
+    @screen(renderMetrics(metrics))
+
 }

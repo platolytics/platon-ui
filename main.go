@@ -259,6 +259,9 @@ func prometheusData(database *frostdb.DB) string {
 	return buf.String()
 }
 
+var cubes []platon.Cube
+var metrics []string
+
 func loadPrometheusData() *frostdb.DB {
 	address := flag.String("address", "localhost", "Prometheus address")
 	port := flag.String("port", "9090", "Prometheus port")
@@ -272,18 +275,23 @@ func loadPrometheusData() *frostdb.DB {
 	}
 
 	// get all metric names
-	labels, err := platon.GetMetrics(client, startTime, endTime)
+	metricValues, err := platon.GetMetrics(client, startTime, endTime)
+	metrics = []string{}
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println("All metrics: \n", labels)
+	for _, metricValue := range metricValues {
+		metrics = append(metrics, string(metricValue))
+	}
+	fmt.Println("All metrics: \n", metrics)
 
 	// init array of results
 	var queryResults []model.Value
 
-	selectedLabels := []string{"node_memory_Cached_bytes", "node_memory_MemFree_bytes"}
+	selectedSeries := []string{"node_memory_Cached_bytes", "node_memory_MemFree_bytes"}
+
 	// get all time series for all metrics
-	for _, label := range selectedLabels {
+	for _, label := range selectedSeries {
 		queryResult, err := platon.GetSamples(client, string(label), startTime, endTime)
 		if err != nil {
 			panic(err)
@@ -297,10 +305,11 @@ func loadPrometheusData() *frostdb.DB {
 	// Open up a database in the column store
 	database, _ := columnstore.DB(context.Background(), "simple_db")
 
-	err = platon.MetricsToTable(queryResults, "memory_cube", database)
+	cube, err := platon.MetricsToTable(queryResults, "memory_cube", database)
 	if err != nil {
 		panic(err)
 	}
+	cubes = append(cubes, cube)
 	return database
 }
 
@@ -313,6 +322,8 @@ func main() {
 	http.Handle("/line", templ.Handler(home.Page(lineChart())))
 	http.Handle("/weather", templ.Handler(home.Page(snowfall())))
 	http.Handle("/prometheus", templ.Handler(home.Page(prometheusData(db))))
+	http.Handle("/cubes", templ.Handler(home.Cubes(cubes)))
+	http.Handle("/metrics", templ.Handler(home.Metrics(metrics)))
 	http.Handle("/static/", http.StripPrefix("/static/", static))
 	err := http.ListenAndServe(":8080", nil)
 	if err != nil {
