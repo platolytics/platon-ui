@@ -1,0 +1,8 @@
+nav.sidebar {
+    border-right: 1px solid #aaaaaa;
+    height: calc(100vh - 4rem);
+    max-width: 16.66%;
+
+    padding-right: 15px;
+    padding-left: 15px;
+}
