@@ -6,6 +6,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/apache/arrow/go/v14/arrow/memory"
+	"github.com/polarsignals/frostdb"
 	"github.com/prometheus/client_golang/api"
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
@@ -69,65 +71,73 @@ func ConstructURL(address string, port string, ssl bool) string {
 	return url
 }
 
-func MetricsToTable(queryResults []model.Value) map[string][]string {
-	tableheaders := FillColumnHeads(queryResults)
+type Entry struct {
+	Labels  map[string]string
+	Metrics map[string]float64
+	Time    int64
+}
 
-	data := map[string][]string{}
+func NewEntry(time int64) *Entry {
+	return &Entry{
+		Time:    time,
+		Labels:  map[string]string{},
+		Metrics: map[string]float64{},
+	}
+}
+
+func MetricsToTable(queryResults []model.Value, tableName string, database *frostdb.DB) error {
+	labelNames, metricNames := FillColumnHeads(queryResults)
+
+	timeData := []int64{}
+	entries := []Entry{}
 	for _, metrics := range queryResults {
 		matrix := metrics.(model.Matrix)
 		for _, sampleStream := range matrix {
 			for _, value := range sampleStream.Values {
-				row := 0
-				newRow := true
-				time := fmt.Sprintf("%v", value.Timestamp)
-				if slices.Contains(data["time"], time) {
-					row = slices.Index(data["time"], time)
-					newRow = false
+				time := int64(value.Timestamp)
+				entry := NewEntry(time)
+				if slices.Contains(timeData, time) {
+					row := slices.Index(timeData, time)
+					entry = &entries[row]
+				} else {
+					timeData = append(timeData, time)
+					entries = append(entries, *entry)
 				}
-				for dimension := range tableheaders {
-					if newRow {
-						if dimension == "time" {
-							data[dimension] = append(data[dimension], time)
-							continue
-						}
-						if dimension == string(sampleStream.Metric["__name__"]) {
-							data[dimension] = append(data[dimension], value.Value.String())
-							continue
-						}
-						for label, value := range sampleStream.Metric {
-							if dimension == string(label) {
-								data[dimension] = append(data[dimension], string(value))
-								continue
-							}
-						}
-						data[dimension] = append(data[dimension], "")
-					} else {
-						if dimension == string(sampleStream.Metric["__name__"]) {
-							data[dimension][row] = value.Value.String()
-							continue
-						}
-						if data[dimension][row] == "" {
-							for label, value := range sampleStream.Metric {
-								if dimension == string(label) {
-									data[dimension][row] = string(value)
-									continue
-								}
-							}
+				for dimension := range metricNames {
+					if dimension == string(sampleStream.Metric["__name__"]) {
+						entry.Metrics[dimension] = float64(value.Value)
+						break
+					}
+				}
+				for dimension := range labelNames {
+					for label, value := range sampleStream.Metric {
+						if dimension == string(label) {
+							entry.Labels[dimension] = string(value)
+							break
 						}
 					}
 				}
 			}
 		}
 	}
-	return data
+	if len(entries) != len(timeData) {
+		return fmt.Errorf("data load error: Inconsistent cube data")
+	}
+
+	dbtable, err := frostdb.NewGenericTable[Entry](
+		database, tableName, memory.DefaultAllocator,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create db table: %v", err)
+	}
+	dbtable.Write(context.Background(), entries...)
+	return nil
 }
 
-func FillColumnHeads(queryResults []model.Value) map[string]bool {
+func FillColumnHeads(queryResults []model.Value) (labelNames, metricNames map[string]bool) {
 
-	// dimensions == {"time":true, "value":true}
-	dimensions := map[string]bool{
-		"time": true,
-	}
+	metricNames = map[string]bool{}
+	labelNames = map[string]bool{}
 	for _, metrics := range queryResults {
 		// map results into matrix
 		matrix := metrics.(model.Matrix)
@@ -136,17 +146,15 @@ func FillColumnHeads(queryResults []model.Value) map[string]bool {
 			for label, value := range sampleStream.Metric {
 				// We want to make the name a column
 				if string(label) != "__name__" {
-					dimensions[string(label)] = true
+					labelNames[string(label)] = true
 				}
 				// Add metric name as column
 				if string(label) == "__name__" {
-					dimensions[string(value)] = true
+					metricNames[string(value)] = true
 				}
 			}
 		}
 	}
 
-	// dimensions at this point should hold all label names + true like so
-	// dimensions = {"time": true, "value": true, "label1":true, "label2": true, ...}
-	return dimensions
+	return
 }

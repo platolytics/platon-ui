@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"time"
 
 	"github.com/platolytics/platon-ui/platon"
 	"github.com/platolytics/platon-ui/templates/home"
@@ -218,14 +219,14 @@ func prometheusData(database *frostdb.DB) string {
 		}))
 
 	engine := query.NewEngine(memory.DefaultAllocator, database.TableProvider())
-	engine.ScanTable("simple_table").
-		//	Aggregate(
-		//		[]*logicalplan.AggregationFunction{
-		//			logicalplan.Avg(logicalplan.Col("metrics.node_memory_Cached_bytes")),
-		//			logicalplan.Avg(logicalplan.Col("metrics.node_memory_MemFree_bytes")),
-		//		},
-		//		[]logicalplan.Expr{logicalplan.Col("time")},
-		//	).
+	engine.ScanTable("memory_cube").
+		Aggregate(
+			[]*logicalplan.AggregationFunction{
+				logicalplan.Avg(logicalplan.Col("metrics.node_memory_Cached_bytes")),
+				logicalplan.Avg(logicalplan.Col("metrics.node_memory_MemFree_bytes")),
+			},
+			[]logicalplan.Expr{logicalplan.Col("time")},
+		).
 		Execute(context.Background(), func(ctx context.Context, r arrow.Record) error {
 			fmt.Println(r)
 			fmt.Println(r.ColumnName(0))
@@ -234,7 +235,13 @@ func prometheusData(database *frostdb.DB) string {
 			for colIndex := 0; colIndex < int(r.NumCols()); colIndex++ {
 
 				if r.ColumnName(colIndex) == "time" {
-					line.SetXAxis(r.Column(colIndex))
+
+					xAxis := []string{}
+					for i := 0; i < int(r.NumRows()); i++ {
+						timestamp := time.Unix(r.Column(colIndex).GetOneForMarshal(i).(int64)/1000, 0)
+						xAxis = append(xAxis, timestamp.Format(time.RFC3339))
+					}
+					line.SetXAxis(xAxis)
 					continue
 				}
 				columnData := []opts.LineData{}
@@ -250,11 +257,6 @@ func prometheusData(database *frostdb.DB) string {
 	buf := new(bytes.Buffer)
 	line.Render(buf)
 	return buf.String()
-}
-
-type Entry struct {
-	Metrics map[string]string
-	Time    string
 }
 
 func loadPrometheusData() *frostdb.DB {
@@ -295,28 +297,10 @@ func loadPrometheusData() *frostdb.DB {
 	// Open up a database in the column store
 	database, _ := columnstore.DB(context.Background(), "simple_db")
 
-	table := platon.MetricsToTable(queryResults)
-	dbtable, _ := frostdb.NewGenericTable[Entry](
-		database, "simple_table", memory.DefaultAllocator,
-	)
-	entries := []Entry{}
-	for i := 0; i < len(table["time"]); i++ {
-		e := Entry{
-			Metrics: map[string]string{},
-		}
-		for dimension := range table {
-			if dimension == "time" {
-				e.Time = table[dimension][i]
-			} else {
-				e.Metrics[dimension] = table[dimension][i]
-			}
-		}
-
-		entries = append(entries, e)
+	err = platon.MetricsToTable(queryResults, "memory_cube", database)
+	if err != nil {
+		panic(err)
 	}
-
-	dbtable.Write(context.Background(), entries...)
-	fmt.Println(table)
 	return database
 }
 
