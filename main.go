@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"flag"
 	"fmt"
 	"log"
 	"math/rand"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/platolytics/platon-ui/platon"
 	"github.com/platolytics/platon-ui/templates/home"
-	"github.com/prometheus/common/model"
 
 	"github.com/apache/arrow/go/v14/arrow"
 	"github.com/apache/arrow/go/v14/arrow/memory"
@@ -208,7 +206,7 @@ func getAverageSnow(engine *query.LocalEngine, weekdays []string, city string) [
 	return result
 }
 
-func prometheusData(database *frostdb.DB) string {
+func prometheusData(platon platon.Platon, cube platon.Cube) string {
 
 	line := charts.NewLine()
 	line.SetGlobalOptions(
@@ -218,8 +216,8 @@ func prometheusData(database *frostdb.DB) string {
 			Subtitle: "Aggregated in frostdb backend",
 		}))
 
-	engine := query.NewEngine(memory.DefaultAllocator, database.TableProvider())
-	engine.ScanTable("memory_cube").
+	engine := platon.GetQueryEngine()
+	engine.ScanTable(cube.Name).
 		Aggregate(
 			[]*logicalplan.AggregationFunction{
 				logicalplan.Avg(logicalplan.Col("metrics.node_memory_Cached_bytes")),
@@ -259,17 +257,12 @@ func prometheusData(database *frostdb.DB) string {
 	return buf.String()
 }
 
-var cubes []platon.Cube
 var metrics []string
 
-func loadPrometheusData() *frostdb.DB {
-	address := flag.String("address", "localhost", "Prometheus address")
-	port := flag.String("port", "9090", "Prometheus port")
-	isSSL := flag.Bool("ssl", false, "Enable transport security")
+func loadMetrics() {
 	startTime, endTime := platon.GetQueryTimes()
-
 	// start prometheus client
-	client, err := platon.CreatePromClient(platon.ConstructURL(*address, *port, *isSSL))
+	client, err := platon.GetPromClient()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -284,44 +277,30 @@ func loadPrometheusData() *frostdb.DB {
 		metrics = append(metrics, string(metricValue))
 	}
 	fmt.Println("All metrics: \n", metrics)
+}
 
-	// init array of results
-	var queryResults []model.Value
-
-	selectedSeries := []string{"node_memory_Cached_bytes", "node_memory_MemFree_bytes"}
-
-	// get all time series for all metrics
-	for _, label := range selectedSeries {
-		queryResult, err := platon.GetSamples(client, string(label), startTime, endTime)
-		if err != nil {
-			panic(err)
-		}
-		queryResults = append(queryResults, queryResult)
-	}
-
-	columnstore, _ := frostdb.New()
-	//defer columnstore.Close()
-
-	// Open up a database in the column store
-	database, _ := columnstore.DB(context.Background(), "simple_db")
-
-	cube, err := platon.MetricsToTable(queryResults, "memory_cube", database)
-	if err != nil {
-		panic(err)
+func initExampleCubes() []platon.Cube {
+	var cubes []platon.Cube
+	cube := platon.Cube{
+		Name:    "memory_cube",
+		Metrics: []string{"node_memory_Cached_bytes", "node_memory_MemFree_bytes"},
 	}
 	cubes = append(cubes, cube)
-	return database
+	return cubes
 }
 
 //go:generate templ generate
 func main() {
 	fmt.Println("Starting Platon UI..")
-	db := loadPrometheusData()
+	loadMetrics()
+	cubes := initExampleCubes()
+	platon := platon.LoadCubes(cubes)
+	defer platon.Close()
 	static := http.FileServer(http.Dir("./static"))
 	http.Handle("/", templ.Handler(home.Page(barChart())))
 	http.Handle("/line", templ.Handler(home.Page(lineChart())))
 	http.Handle("/weather", templ.Handler(home.Page(snowfall())))
-	http.Handle("/prometheus", templ.Handler(home.Page(prometheusData(db))))
+	http.Handle("/prometheus", templ.Handler(home.Page(prometheusData(platon, cubes[0]))))
 	http.Handle("/cubes", templ.Handler(home.Cubes(cubes)))
 	http.Handle("/metrics", templ.Handler(home.Metrics(metrics)))
 	http.Handle("/static/", http.StripPrefix("/static/", static))

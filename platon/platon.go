@@ -2,26 +2,43 @@ package platon
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"log"
 	"slices"
 	"time"
 
 	"github.com/apache/arrow/go/v14/arrow/memory"
 	"github.com/polarsignals/frostdb"
+	"github.com/polarsignals/frostdb/query"
 	"github.com/prometheus/client_golang/api"
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
 )
 
-func CreatePromClient(promAddress string) (api.Client, error) {
-	client, err := api.NewClient(api.Config{
-		Address: promAddress,
+var promClient api.Client
+var promClientInitialized bool = false
+
+func GetPromClient() (api.Client, error) {
+	if promClientInitialized {
+		return promClient, nil
+	}
+	address := flag.String("address", "localhost", "Prometheus address")
+	port := flag.String("port", "9090", "Prometheus port")
+	isSSL := flag.Bool("ssl", false, "Enable transport security")
+
+	url := ConstructURL(*address, *port, *isSSL)
+	var err error
+	promClient, err = api.NewClient(api.Config{
+		Address: url,
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("Error creating client: %v\n", err)
+		return nil, fmt.Errorf("error creating client: %v", err)
 	}
-	return client, nil
+	promClientInitialized = true
+
+	return promClient, nil
 }
 
 func GetMetrics(client api.Client, startTime time.Time, endTime time.Time) (model.LabelValues, error) {
@@ -93,10 +110,7 @@ type Cube struct {
 	Metrics     []string
 }
 
-func MetricsToTable(queryResults []model.Value, tableName string, database *frostdb.DB) (Cube, error) {
-	cube := Cube{
-		Name: tableName,
-	}
+func MetricsToTable(queryResults []model.Value, cube Cube, database *frostdb.DB) error {
 	cube.Labels, cube.Metrics = FillColumnHeads(queryResults)
 
 	timeData := []int64{}
@@ -132,17 +146,17 @@ func MetricsToTable(queryResults []model.Value, tableName string, database *fros
 		}
 	}
 	if len(entries) != len(timeData) {
-		return cube, fmt.Errorf("data load error: Inconsistent cube data")
+		return fmt.Errorf("data load error: Inconsistent cube data")
 	}
 
 	dbtable, err := frostdb.NewGenericTable[Entry](
-		database, tableName, memory.DefaultAllocator,
+		database, cube.Name, memory.DefaultAllocator,
 	)
 	if err != nil {
-		return cube, fmt.Errorf("failed to create db table: %v", err)
+		return fmt.Errorf("failed to create db table: %v", err)
 	}
 	dbtable.Write(context.Background(), entries...)
-	return cube, nil
+	return nil
 }
 
 func FillColumnHeads(queryResults []model.Value) (labelNames, metricNames []string) {
@@ -172,4 +186,53 @@ func FillColumnHeads(queryResults []model.Value) (labelNames, metricNames []stri
 	}
 
 	return
+}
+
+type Platon struct {
+	db *frostdb.DB
+}
+
+func LoadCubes(cubes []Cube) Platon {
+	platon := Platon{}
+	startTime, endTime := GetQueryTimes()
+	// start prometheus client
+	client, err := GetPromClient()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	columnstore, _ := frostdb.New()
+
+	platon.db, _ = columnstore.DB(context.Background(), "simple_db")
+
+	for i := range cubes {
+		cube := &cubes[i]
+
+		var queryResults []model.Value
+
+		for _, label := range cube.Metrics {
+			queryResult, err := GetSamples(client, string(label), startTime, endTime)
+			if err != nil {
+				panic(err)
+			}
+			queryResults = append(queryResults, queryResult)
+		}
+
+		cube.Labels, cube.Metrics = FillColumnHeads(queryResults)
+
+		err := MetricsToTable(queryResults, cubes[i], platon.db)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	return platon
+}
+
+func (p *Platon) GetQueryEngine() *query.LocalEngine {
+	return query.NewEngine(memory.DefaultAllocator, p.db.TableProvider())
+}
+
+func (p *Platon) Close() {
+	p.db.Close()
 }
